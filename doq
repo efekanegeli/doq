@@ -1,0 +1,148 @@
+#!/bin/bash
+
+#Configuration#
+spec_file_name_pattern="*Spec.swift"
+regex_for_describe="describe\(\"([^)]*)\"\)"
+regex_for_context="context\(\"([^)]*)\"\)"
+regex_for_it="it\(\"([^)]*)\"\)"
+script_source_directory="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+documentation_file_path=${script_source_directory}/doqumentation
+#Configuration#
+
+spec_files=(`find . -type f -name $spec_file_name_pattern`)
+
+global_rematch() {
+    local s=$1 regex=$2
+    while [[ $s =~ $regex ]]; do
+        echo "${BASH_REMATCH[1]}"
+        s=${s#*"${BASH_REMATCH[1]}"}
+    done
+}
+
+write_its_to_file() {
+    local s=$1 regex=$2
+    arr=()
+    while [[ $s =~ $regex ]]; do
+        arr+=("${BASH_REMATCH[1]}")
+        s=${s#*"${BASH_REMATCH[1]}"}
+    done
+
+    arr_size=${#arr[@]}
+
+    for (( i=0; i<$arr_size; i++ )); do
+      it_line=${arr[$i]}
+      echo "###" "$it_line" >> ${documentation_file_path}/appDocumentation.md
+    done
+}
+
+#clean up temp files
+clean_up() {
+  rm tempDescribeScope.txt
+  rm tempContextScope.txt
+}
+
+rm ${documentation_file_path}/appDocumentation.md
+
+spec_files_size=${#spec_files[@]}
+last_spec_file_position=$(($spec_files_size-1))
+last_spec_file=${spec_files[$last_spec_file_position]}
+
+for i in "${spec_files[@]}"
+do :
+  filename_with_path=$i
+  filename_with_extension=$(basename -- $filename_with_path)
+  filename_without_extension="${filename_with_extension%.*}"
+
+  echo "Parsing File:" "$filename_without_extension"
+  echo "#" "$filename_without_extension" >> ${documentation_file_path}/appDocumentation.md
+
+  describe_opening_lines=($(awk "/$regex_for_describe/{ print NR }" $filename_with_path))
+  describe_closing_lines=0
+  while IFS= read -r line ; do {
+    leading_white_space_count=0
+    if [[ $line == *"describe("* ]]; then
+      leading_white_space_count=`awk -F'[^ ]' '{print length($1)}' <<<"$line"`
+      regex="^[ \t]{${leading_white_space_count}}}"
+      describe_closing_lines=($(awk "/$regex/{ if (NR > "${describe_opening_lines[0]}") print NR }" $filename_with_path))
+      break
+    fi
+  } done < $filename_with_path
+
+  describe_lines_size=${#describe_opening_lines[@]}
+  for (( j=0; j<$describe_lines_size; j++ )); do
+    describe_opening_line=${describe_opening_lines[$j]}
+    describe_closing_line=${describe_closing_lines[$j]}
+    describe_scope=$(sed -n "${describe_opening_line},${describe_closing_line}p" < $filename_with_path)
+    echo "$describe_scope" > tempDescribeScope.txt
+
+    description=$( global_rematch "$describe_scope" "$regex_for_describe" )
+    echo "##" "$description" >> ${documentation_file_path}/appDocumentation.md
+
+    context_opening_lines=($(awk "/$regex_for_context/{ print NR }" tempDescribeScope.txt))
+    context_closing_lines=0
+    while IFS= read -r line ; do {
+      leading_white_space_count=0
+      if [[ $line == *"context("* ]]; then
+        leading_white_space_count=`awk -F'[^ ]' '{print length($1)}' <<<"$line"`
+        regex="^[ \t]{${leading_white_space_count}}}"
+        context_closing_lines=($(awk "/$regex/{ if (NR > "${context_opening_lines[0]}") print NR }" tempDescribeScope.txt))
+        break
+      fi
+
+    } done < tempDescribeScope.txt
+
+    context_lines_size=${#context_opening_lines[@]}
+    for (( k=0; k<$context_lines_size; k++ )); do
+      context_opening_line=${context_opening_lines[$k]}
+      context_closing_line=${context_closing_lines[$k]}
+      context_scope=$(sed -n "${context_opening_line},${context_closing_line}p" < tempDescribeScope.txt)
+      echo "$context_scope" > tempContextScope.txt
+
+      context=$( global_rematch "$context_scope" "$regex_for_context" )
+      echo "##" "$context" >> ${documentation_file_path}/appDocumentation.md
+      write_its_to_file "$context_scope" "$regex_for_it"
+
+      it_opening_lines=($(awk "/$regex_for_it/{ print NR }" tempDescribeScope.txt))
+      it_closing_lines=0
+      while IFS= read -r line ; do {
+        leading_white_space_count=0
+        if [[ $line == *"it("* ]]; then
+          leading_white_space_count=`awk -F'[^ ]' '{print length($1)}' <<<"$line"`
+          regex="^[ \t]{${leading_white_space_count}}}"
+          it_closing_lines=($(awk "/$regex/{ print NR }" tempDescribeScope.txt))
+          break
+        fi
+
+      } done < tempDescribeScope.txt
+    done
+
+    it_lines_size=${#it_opening_lines[@]}
+    it_index=0
+    context_index=0
+    while [ $it_index -lt $it_lines_size ]
+    do
+      it_opening_line=${it_opening_lines[$it_index]}
+      it_closing_line=${it_closing_lines[$it_index]}
+      context_opening_line=${context_opening_lines[$context_index]}
+      context_closing_line=${context_closing_lines[$context_index]}
+
+      if [[ $it_opening_line -lt $context_opening_line ]];
+      then
+        it_scope=$(sed -n "${it_opening_line},${it_closing_line}p" < tempDescribeScope.txt)
+        write_its_to_file "$it_scope" "$regex_for_it"
+        it_index=$(( $it_index + 1 ))
+      elif [[ $it_opening_line -lt $context_closing_line ]];
+      then
+          it_index=$(( $it_index + 1 ))
+          continue
+      else
+        context_index=$(( $context_index + 1 ))
+      fi
+    done
+  done
+
+  if [[ $filename_with_path == $last_spec_file ]]; then
+    clean_up
+  fi
+
+done
